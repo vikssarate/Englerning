@@ -475,6 +475,49 @@ function renderSubjects(){
   });
 }
 
+/* ===== NEW: openTopic so chunk pills open correctly ===== */
+function openTopic(subId, topicId, highlightChunkId=null){
+  const sub=DB.subjects.find(s=>s.id===subId); 
+  const topic=sub?.topics.find(t=>t.id===topicId);
+  if(!topic){workArea.textContent="Topic not found"; return;}
+  workArea.classList.remove("empty");
+
+  const selectedChunkName = highlightChunkId ? (topic.chunks.find(c=>c.id===highlightChunkId)?.name || "") : "";
+  workArea.innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div><strong>${sub.name}</strong> → <strong>${topic.name}</strong></div>
+      <div class="small">${selectedChunkName?`Currently selected: <b>${selectedChunkName}</b>`:""}</div>
+    </div>
+    <div class="hr"></div>
+    <div id="chunkList"></div>`;
+  const container=document.querySelector("#chunkList");
+
+  if(topic.chunks.length===0){container.innerHTML='<div class="empty">No chunks yet.</div>';return;}
+  topic.chunks.forEach(ch=>{
+    normalizeChunk(ch);
+    const card=document.createElement("div"); card.className="card"; card.id=`chunk-${ch.id}`;
+    card.innerHTML=`
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div><strong>${ch.name}</strong> <span class="badge ${phaseClass(ch)}">${phaseLabel(ch)}</span></div>
+        <div style="display:flex;gap:6px">
+          <button class="btn alt" data-act="rename">Rename</button>
+          <button class="btn danger" data-act="del">Delete</button>
+        </div>
+      </div>
+      ${renderChunkBody(ch)}
+      ${renderCycleFooterHTML(ch)}
+    `;
+    attachChunkHandlers(card, topic, ch);
+    container.append(card);
+  });
+
+  // Jump to and flash selected chunk
+  if(highlightChunkId){
+    const el = document.getElementById(`chunk-${highlightChunkId}`);
+    if(el){ el.scrollIntoView({behavior:"smooth",block:"start"}); el.classList.add("flash"); setTimeout(()=>el.classList.remove("flash"),1200); }
+  }
+}
+
 function phaseLabel(ch){return ch.phase==="intense"?"intense":ch.phase==="week_streak"?"week-streak":ch.phase==="spaced"?"spaced":"weekly";}
 function phaseClass(ch){return ch.phase==="intense"?"state-intense":ch.phase==="week_streak"?"state-streak":ch.phase==="spaced"?"state-spaced":"state-weekly";}
 
