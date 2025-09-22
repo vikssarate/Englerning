@@ -16,7 +16,7 @@ header h1{margin:0;font-size:18px;font-weight:600}
 @media(min-width:900px){.grid{grid-template-columns:300px 1fr}}
 .btn{background:var(--accent);color:#071225;border:none;border-radius:10px;padding:8px 10px;cursor:pointer;font-weight:600}
 .btn.alt{background:#2b3258}.btn.danger{background:var(--bad)}.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--ink)}
-input[type="text"]{background:#0f1325;color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px}
+input[type="text"],input[type="password"]{background:#0f1325;color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px}
 .small{font-size:12px;color:var(--muted)}
 .badge{padding:2px 6px;border:1px solid var(--line);border-radius:6px}
 .state-intense{background:#24324f}.state-streak{background:#2a3a2a}.state-spaced{background:#2f2a3a}.state-weekly{background:#2a3440}
@@ -54,7 +54,7 @@ ul{padding:0;margin:0}.list{display:flex;flex-direction:column;gap:8px;max-heigh
 .prog .bar{height:100%;background:var(--ok);width:0%}
 .prog .labels{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:6px;gap:8px;flex-wrap:wrap}
 
-/* ====== NEW: Due Today strip at top ====== */
+/* Due Today strip */
 .duebar{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .duebar .title{font-weight:700;margin-right:6px}
 .due-pill{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:6px 10px;font-size:12px}
@@ -62,6 +62,9 @@ ul{padding:0;margin:0}.list{display:flex;flex-direction:column;gap:8px;max-heigh
 .due-pill .phase{opacity:.8}
 .due-pill .act{margin-left:4px}
 </style>
+
+<!-- PouchDB for cloud sync -->
+<script src="https://cdn.jsdelivr.net/npm/pouchdb@9.0.0/dist/pouchdb.min.js"></script>
 </head>
 <body>
 <header class="wrap">
@@ -72,9 +75,16 @@ ul{padding:0;margin:0}.list{display:flex;flex-direction:column;gap:8px;max-heigh
     <input id="importFile" type="file" accept="application/json"/>
     <span class="small">Import JSON</span>
   </label>
+
+  <!-- CouchDB login (new) -->
+  <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+    <input id="couchUser" type="text" placeholder="Couch user" style="width:120px">
+    <input id="couchPass" type="password" placeholder="••••••" style="width:120px">
+    <button id="couchLoginBtn" class="btn">Login</button>
+    <span id="couchStatus" class="small">offline</span>
+  </div>
 </header>
 
-<!-- NEW: Due Today strip -->
 <div class="wrap">
   <div id="dueBar" class="duebar small">
     <span class="title">Due Today:</span>
@@ -121,8 +131,15 @@ function addDaysYMD(ymd, n){
 }
 function isPastOrToday(ymd){ return !ymd || ymd <= todayYMD(); }
 
+/* ===== Cloud Sync (PouchDB ⇄ CouchDB) ===== */
+const COUCH_BASE = 'https://your-couch.example.com'; // <-- EDIT to your CouchDB base URL (HTTPS)
+const DB_PREFIX  = 'notes_';                          // per-user db name prefix
+const STATE_DOC_ID = 'APP_STATE_V1';
+
+let pouchLocal=null, pouchRemote=null, SYNC=null, CURRENT_USER=null, SAVE_TIMER=null;
+
 /* ===== STORAGE & CONFIG ===== */
-const LSK="mem_spaced_v11_altC"; // NEW localStorage key
+const LSK="mem_spaced_v11_altC"; // localStorage mirror
 let DB=JSON.parse(localStorage.getItem(LSK)||'{"subjects":[]}');
 
 /* UI expand/collapse state (not exported) */
@@ -132,8 +149,76 @@ const SCHEDULE_GROUPS=[{gap:1,reps:6},{gap:2,reps:6},{gap:3,reps:5},{gap:4,reps:
 const PERPETUAL_GAP=7;
 const TOTAL_SPACED_REPS = SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
 
+/* ===== Pouch helpers ===== */
+function ensureLocalPouch(){ if(!pouchLocal) pouchLocal = new PouchDB('english-learning-app-state'); }
+
+async function saveStateToPouchDebounced(){
+  clearTimeout(SAVE_TIMER);
+  SAVE_TIMER = setTimeout(async ()=>{
+    try{
+      ensureLocalPouch();
+      let doc;
+      try{ doc = await pouchLocal.get(STATE_DOC_ID); }
+      catch(e){ if(e.status!==404) throw e; doc={_id:STATE_DOC_ID}; }
+      doc.data = DB; doc.updatedAt = Date.now();
+      await pouchLocal.put(doc);
+    }catch(e){ console.error('pouch save error', e); }
+  },250);
+}
+
+async function loadStateFromLocalPouch(){
+  ensureLocalPouch();
+  try{
+    const doc = await pouchLocal.get(STATE_DOC_ID);
+    if(doc && doc.data && doc.data.subjects){
+      DB = doc.data;
+      localStorage.setItem(LSK, JSON.stringify(DB));
+    }
+  }catch(e){ if(e.status!==404) console.warn('load local pouch error', e); }
+}
+
+async function loadStateFromRemote(){
+  if(!pouchRemote) return;
+  try{
+    await pouchLocal.replicate.from(pouchRemote,{retry:false});
+    await loadStateFromLocalPouch();
+    renderAll();
+  }catch(e){ console.warn('remote load error', e); }
+}
+
+async function couchLogin(username, password){
+  const res = await fetch(`${COUCH_BASE}/_session`, {
+    method:'POST', credentials:'include',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:username, password})
+  });
+  if(!res.ok) throw new Error('CouchDB login failed');
+  CURRENT_USER = username;
+  startSync();
+  await loadStateFromRemote();
+  document.getElementById('couchStatus').textContent='online';
+}
+
+function startSync(){
+  ensureLocalPouch();
+  if(!CURRENT_USER) return;
+  const remoteDbName = DB_PREFIX + CURRENT_USER;
+  pouchRemote = new PouchDB(`${COUCH_BASE}/${remoteDbName}`, {
+    fetch:(url,opts)=>{ opts.credentials='include'; return PouchDB.fetch(url,opts); }
+  });
+  if(SYNC) SYNC.cancel();
+  SYNC = pouchLocal.sync(pouchRemote,{live:true,retry:true})
+    .on('active', ()=> document.getElementById('couchStatus').textContent='syncing…')
+    .on('paused', ()=> document.getElementById('couchStatus').textContent='online')
+    .on('error',  (e)=>{ console.error('sync error',e); document.getElementById('couchStatus').textContent='error'; });
+}
+
 /* ===== SAVE & RENDER ===== */
-function save(){localStorage.setItem(LSK,JSON.stringify(DB)); renderAll();}
+function save(){
+  localStorage.setItem(LSK, JSON.stringify(DB));
+  saveStateToPouchDebounced();   // cloud mirror
+  renderAll();
+}
 
 /* ===== MODELS ===== */
 function createSubject(name){return{id:crypto.randomUUID(),name,topics:[]};}
@@ -200,10 +285,11 @@ function spacedRepsDoneCount(ch){
   return done;
 }
 function renderCycleFooterHTML(ch){
+  const totalSpaced = SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
   const intenseDays=["day1","day2","day3"].reduce((n,k)=>n+(ch.intense[k].every(Boolean)?1:0),0);
   const week= Math.min(ch.weekStreak?.streak||0,3);
   const spaced= spacedRepsDoneCount(ch);
-  const total = 3 + 3 + SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
+  const total = 3 + 3 + totalSpaced;
   const pct = Math.round(((intenseDays + week + spaced)/total)*100);
   return `
     <div class="prog">
@@ -212,8 +298,7 @@ function renderCycleFooterHTML(ch){
         <span><b>${pct}%</b> of full cycle</span>
         <span>Intense ${intenseDays}/3</span>
         <span>Week-streak ${week}/3</span>
-        <span>Spaced ${spaced}/${total-6}</span>
-        <span>Weekly repeats forever</span>
+        <span>Spaced ${spaced}/${totalSpaced}</span>
       </div>
     </div>
   `;
@@ -222,12 +307,12 @@ function renderCycleFooterHTML(ch){
 /* ===== RENDER ===== */
 function renderAll(){ 
   todayDateEl.textContent=`— ${todayYMD()}`; 
-  renderDueBar();              // NEW
+  renderDueBar();
   renderSubjects(); 
   renderToday(); 
 }
 
-/* ===== NEW: Top Due strip ===== */
+/* ===== Top Due strip ===== */
 function renderDueBar(){
   const rows=collectDue();
   dueBar.innerHTML = '<span class="title">Due Today:</span>';
@@ -247,14 +332,13 @@ function renderDueBar(){
       ${
         ch.phase==="intense" 
           ? '<button class="btn ghost act" data-act="open-only">Open</button>'
-          : `<button class="btn alt act" data-act="review">${ch.phase==="weekly"?"Review":"Review"}</button>`
+          : '<button class="btn alt act" data-act="review">Review</button>'
       }
     `;
     pill.dataset.sub=sub.id; pill.dataset.topic=topic.id; pill.dataset.chunk=ch.id;
     dueBar.appendChild(pill);
   });
 
-  // events
   dueBar.onclick = (e)=>{
     const pill = e.target.closest(".due-pill"); if(!pill) return;
     const act = e.target.dataset.act || "open-only";
@@ -268,9 +352,8 @@ function renderDueBar(){
       if(C.phase==="week_streak") doWeekStreakReview(C);
       else if(C.phase==="spaced") doSpacedReview(C);
       else if(C.phase==="weekly") doWeeklyReview(C);
-      save(); // re-renders strip + tables
+      save();
     }else{
-      // just jump to the chunk
       UI.current={subId:sid, topicId:tid, chunkId:cid};
       openTopic(sid,tid,cid);
     }
@@ -344,7 +427,6 @@ function renderSubjects(){
           `).join("");
         }
 
-        // handle clicks inside this topic item
         ti.addEventListener("click",(e)=>{
           const btn=e.target.closest("[data-act]"); if(!btn) return;
           const act=btn.dataset.act;
@@ -391,67 +473,6 @@ function renderSubjects(){
 
     subjectsEl.appendChild(li);
   });
-}
-
-function renderCycleFooterHTML(ch){
-  const totalSpaced = SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
-  const intenseDays=["day1","day2","day3"].reduce((n,k)=>n+(ch.intense[k].every(Boolean)?1:0),0);
-  const week= Math.min(ch.weekStreak?.streak||0,3);
-  const spaced= spacedRepsDoneCount(ch);
-  const total = 3 + 3 + totalSpaced;
-  const pct = Math.round(((intenseDays + week + spaced)/total)*100);
-  return `
-    <div class="prog">
-      <div class="line"><div class="bar" style="width:${pct}%"></div></div>
-      <div class="labels">
-        <span><b>${pct}%</b> of full cycle</span>
-        <span>Intense ${intenseDays}/3</span>
-        <span>Week-streak ${week}/3</span>
-        <span>Spaced ${spaced}/${totalSpaced}</span>
-      </div>
-    </div>
-  `;
-}
-
-function openTopic(subId,topicId,highlightChunkId=null){
-  const sub=DB.subjects.find(s=>s.id===subId); const topic=sub?.topics.find(t=>t.id===topicId);
-  if(!topic){workArea.textContent="Topic not found"; return;}
-  workArea.classList.remove("empty");
-
-  const selectedChunkName = highlightChunkId ? (topic.chunks.find(c=>c.id===highlightChunkId)?.name || "") : "";
-  workArea.innerHTML=`
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <div><strong>${sub.name}</strong> → <strong>${topic.name}</strong></div>
-      <div class="small">${selectedChunkName?`Currently selected: <b>${selectedChunkName}</b>`:""}</div>
-    </div>
-    <div class="hr"></div>
-    <div id="chunkList"></div>`;
-  const container=$("#chunkList",workArea);
-
-  if(topic.chunks.length===0){container.innerHTML='<div class="empty">No chunks yet.</div>';return;}
-  topic.chunks.forEach(ch=>{
-    normalizeChunk(ch);
-    const card=document.createElement("div"); card.className="card"; card.id=`chunk-${ch.id}`;
-    card.innerHTML=`
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <div><strong>${ch.name}</strong> <span class="badge ${phaseClass(ch)}">${phaseLabel(ch)}</span></div>
-        <div style="display:flex;gap:6px">
-          <button class="btn alt" data-act="rename">Rename</button>
-          <button class="btn danger" data-act="del">Delete</button>
-        </div>
-      </div>
-      ${renderChunkBody(ch)}
-      ${renderCycleFooterHTML(ch)}
-    `;
-    attachChunkHandlers(card, topic, ch);
-    container.append(card);
-  });
-
-  // Jump to and flash the chosen chunk, if provided
-  if(highlightChunkId){
-    const el = document.getElementById(`chunk-${highlightChunkId}`);
-    if(el){ el.scrollIntoView({behavior:"smooth",block:"start"}); el.classList.add("flash"); setTimeout(()=>el.classList.remove("flash"),1200); }
-  }
 }
 
 function phaseLabel(ch){return ch.phase==="intense"?"intense":ch.phase==="week_streak"?"week-streak":ch.phase==="spaced"?"spaced":"weekly";}
@@ -637,29 +658,69 @@ function renderToday(){
   });
 }
 
+/* ===== IST Midnight scheduler ===== */
+const IST_TZ_OFFSET = '+05:30';
+function msUntilNextIstMidnight(){
+  const nextYmd = addDaysYMD(todayYMD(), 1);
+  const nextIstMidnight = new Date(`${nextYmd}T00:00:00${IST_TZ_OFFSET}`);
+  return Math.max(500, nextIstMidnight.getTime() - Date.now());
+}
+function tickAtIstMidnight(){
+  renderAll();
+  setTimeout(tickAtIstMidnight, msUntilNextIstMidnight());
+}
+function startIstMidnightScheduler(){
+  setTimeout(tickAtIstMidnight, msUntilNextIstMidnight());
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') renderAll(); });
+}
+
 /* ===== import/export & bootstrap ===== */
-$("#exportJson").addEventListener("click",()=>{
+document.getElementById("exportJson").addEventListener("click",()=>{
   const blob=new Blob([JSON.stringify(DB,null,2)],{type:"application/json"});
   const url=URL.createObjectURL(blob); const a=document.createElement("a");
-  a.href=url; a.download=`mem_spaced_altC_${todayYMD()}.json`; // NEW filename prefix
+  a.href=url; a.download=`mem_spaced_altC_${todayYMD()}.json`;
   a.click(); URL.revokeObjectURL(url);
 });
-$("#importFile").addEventListener("change",(e)=>{
+document.getElementById("importFile").addEventListener("change",(e)=>{
   const f=e.target.files?.[0]; if(!f) return;
   const fr=new FileReader(); fr.onload=()=>{try{const data=JSON.parse(fr.result); if(!data.subjects) throw 0; DB=data; save();}catch{alert("Invalid JSON");}};
   fr.readAsText(f);
 });
-$("#addSubject").addEventListener("click",()=>{
-  const n=$("#newSubject").value.trim(); if(!n) return;
-  DB.subjects.push(createSubject(n)); $("#newSubject").value=""; save();
+document.getElementById("addSubject").addEventListener("click",()=>{
+  const n=document.getElementById("newSubject").value.trim(); if(!n) return;
+  DB.subjects.push(createSubject(n)); document.getElementById("newSubject").value=""; save();
 });
 
-if(DB.subjects.length===0){
-  const s=createSubject("History");
-  const t=createTopic("President of India Timeline");
-  t.chunks.push(createChunk("C1"));
-  s.topics.push(t); DB.subjects.push(s); save();
-}else{renderAll();}
+// Login hook
+document.getElementById("couchLoginBtn").addEventListener("click", async ()=>{
+  const u=document.getElementById("couchUser").value.trim();
+  const p=document.getElementById("couchPass").value;
+  const s=document.getElementById("couchStatus");
+  s.textContent='logging in…';
+  try{ await couchLogin(u,p); }
+  catch(e){ console.error(e); alert('Login failed'); s.textContent='offline'; }
+});
+
+// Ask browser not to evict storage (helps on mobile)
+if(navigator.storage && navigator.storage.persist){
+  navigator.storage.persist().then(g=>console.log('persistent storage?', g));
+}
+
+// First, try restoring from local pouch (which may have recent cloud data)
+ensureLocalPouch();
+loadStateFromLocalPouch().then(()=>{
+  if(DB.subjects.length===0){
+    const s=createSubject("History");
+    const t=createTopic("President of India Timeline");
+    t.chunks.push(createChunk("C1"));
+    s.topics.push(t); DB.subjects.push(s); save();
+  }else{
+    renderAll();
+  }
+});
+
+// Start the IST midnight rollover timer
+startIstMidnightScheduler();
 </script>
 </body>
 </html>
