@@ -498,14 +498,16 @@ if(navigator.storage && navigator.storage.persist){ navigator.storage.persist().
 /* Load from local pouch first */
 ensureLocalPouch();
 loadStateFromLocalPouch().then(()=>{
-  if(DB.subjects.length===0){
-    const s=createSubject("History"); const t=createTopic("President of India Timeline"); t.chunks.push(createChunkt.chunks.push(createChunk("C1"));
-s.topics.push(t);
-DB.subjects.push(s);
-save();
-} else {
-  renderAll();
-}
+  if (DB.subjects.length === 0) {
+    const s = createSubject("History");
+    const t = createTopic("President of India Timeline");
+    t.chunks.push(createChunk("C1"));
+    s.topics.push(t);
+    DB.subjects.push(s);
+    save();
+  } else {
+    renderAll();
+  }
 });
 
 // Start the IST midnight rollover timer
